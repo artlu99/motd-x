@@ -1,0 +1,8 @@
+node_modules/
+.wrangler/
+dist/
+*.log
+.dev.vars
+bun.lock
+AGENTS.md
+.claude/

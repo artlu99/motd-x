@@ -1,0 +1,21 @@
+{
+  "name": "motd-x",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "hono": "^4.9.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251004.0",
+    "bun-types": "^1.2.23",
+    "typescript": "^5.9.0",
+    "wrangler": "^4.145.0"
+  }
+}
