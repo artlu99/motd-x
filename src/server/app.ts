@@ -140,7 +140,7 @@ async function fetchNormalized(
 }
 
 export function createApp(deps: AppDeps): Hono {
-  const app = new Hono();
+  const app = new Hono({ strict: false });
 
   app.get("/api/daily", async (c) => {
     const translation = c.req.query("translation") ?? "web";

@@ -1,1 +1,3 @@
 LMDIS_REST_TOKEN="<run `wrangler secret put LMDIS_REST_TOKEN` for prod; paste the dev token here for local dev>"
+LMDIS_URL=https://lmdis.artlu.xyz
+X_CLIENT_ID="fill in value"

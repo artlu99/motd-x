@@ -6,3 +6,4 @@ dist/
 bun.lock
 AGENTS.md
 .claude/
+worker-configuration.d.ts

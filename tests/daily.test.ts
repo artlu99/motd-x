@@ -545,3 +545,16 @@ describe("GET /api/daily motd self-healing", () => {
     ).toEqual([{ day: DAY, verify: true }]);
   });
 });
+
+describe("GET /api/daily trailing slash tolerance", () => {
+  it("matches /api/daily/ as well as /api/daily", async () => {
+    const stub = successFetcher();
+    const app = makeApp(stub.fetcher);
+
+    const res = await app.request("/api/daily/");
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as Record<string, any>;
+    expect(body.source).toBe("gospel");
+  });
+});

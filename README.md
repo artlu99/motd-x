@@ -7,6 +7,10 @@ Daily message service for an X Player Card app. Serves a Gospel reading
 Stack: Hono on Cloudflare Workers, lmdis (self-hosted, bearer auth) as the
 only data store.
 
+The base domain serves a minimal landing page pointing at
+[github.com/artlu99/motd-x](https://github.com/artlu99/motd-x). Routes are
+trailing-slash tolerant (`/api/daily/` == `/api/daily`).
+
 ## GET /api/daily
 
 Returns today's message: the MOTD for the day if one exists, otherwise the
@@ -68,7 +72,7 @@ MOTD override:
 ## Cron: periodic self-healing
 
 ```bash
-curl -fsS "https://<your-domain>/api/daily?verify=1" > /dev/null
+curl -fsS "https://motd-x.artlu.xyz/api/daily?verify=1" > /dev/null
 ```
 
 `?verify=1` is safe to run on a schedule (hourly is plenty):
@@ -85,8 +89,41 @@ still served and the next cron run retries. The endpoint is idempotent.
 Example crontab:
 
 ```
-17 * * * * curl -fsS "https://<your-domain>/api/daily?verify=1" > /dev/null
+17 * * * * curl -fsS "https://motd-x.artlu.xyz/api/daily?verify=1" > /dev/null
 ```
+
+## Sign-in (X OAuth)
+
+Sign-in is X OAuth 2.0 with PKCE as a public client (no client secret), scoped
+to `tweet.read users.read`. No X access or refresh tokens are stored — only
+the public profile and a first-party app session.
+
+| Endpoint            | Purpose                                                                     |
+| ------------------- | --------------------------------------------------------------------------- |
+| `GET /auth/start`   | Creates a PKCE attempt; returns the X authorize URL and a poll token.        |
+| `GET /auth/callback`| X redirects here; exchanges the code, stores the profile, closes the attempt.|
+| `GET /auth/poll`    | The embedded iframe polls this until the attempt completes.                  |
+
+Session model: completing sign-in mints a 30-day app session. Only a SHA-256
+hash of the session token is stored (lmdis, with a matching TTL); the raw
+token lives only in the browser. In the iframe flow the token is minted at
+poll time and kept in memory — it is never rendered into the iframe page.
+Standalone sign-in hands the raw token to the page once for `sessionStorage`
+(key `motd_session`), then redirects to `/play`.
+
+Setup:
+
+1. Create an app at [developer.x.com](https://developer.x.com).
+2. User authentication settings: Read, Single page App (public client, no
+   secret), Callback URI `https://motd-x.artlu.xyz/auth/callback`.
+3. Bindings are deployed secrets (not config vars):
+   ```bash
+   wrangler secret put LMDIS_REST_TOKEN   # lmdis bearer token
+   wrangler secret put LMDIS_URL          # https://lmdis.artlu.xyz
+   wrangler secret put X_CLIENT_ID        # OAuth client id
+   ```
+   Then `bun run gen:types` (the generator reads deployed secret names into
+   `Env`) and `bun run deploy`.
 
 ## Uploading a MOTD (out-of-band)
 
