@@ -20,6 +20,13 @@ describe("player embed shell", () => {
     expect(body).toContain('id="motd"');
     expect(body).toContain("/api/daily");
     expect(body).not.toContain("localStorage");
+
+    expect(body).toContain("Sign in with X");
+    expect(body).toContain("personalized messages");
+    expect(body).toContain("/auth/start");
+    expect(body).toContain("/auth/poll");
+    expect(body).toContain("motd_session");
+    expect(body).toContain("/api/daily/me");
   });
 
   it("adapts to iOS Safari and the mobile X app viewer", async () => {
@@ -54,5 +61,32 @@ describe("player embed shell", () => {
     expect(body).toContain(`name="twitter:image" content="${ORIGIN}/card.png"`);
     expect(body).toContain('name="twitter:title"');
     expect(body).toContain('name="twitter:description"');
+  });
+});
+
+describe("cache policy", () => {
+  it("never caches the personalized endpoint or the player shell", async () => {
+    const meRes = await app.request(`${ORIGIN}/api/daily/me`, undefined, {
+      LMDIS_URL: "https://lmdis.test",
+      LMDIS_REST_TOKEN: "t",
+    });
+    expect(meRes.headers.get("cache-control")).toBe("private, no-store");
+
+    const playRes = await app.request(`${ORIGIN}/play`, undefined, {
+      LMDIS_URL: "https://lmdis.test",
+      LMDIS_REST_TOKEN: "t",
+    });
+    expect(playRes.headers.get("cache-control")).toBe("private, no-store");
+  });
+
+  it("keeps the public daily endpoint share-cacheable but browser-fresh", async () => {
+    const res = await app.request(`${ORIGIN}/api/daily`, undefined, {
+      LMDIS_URL: "https://lmdis.test",
+      LMDIS_REST_TOKEN: "t",
+    });
+    const cc = res.headers.get("cache-control") ?? "";
+    expect(cc).toContain("public");
+    expect(cc).toContain("max-age=0");
+    expect(cc).toContain("s-maxage=");
   });
 });

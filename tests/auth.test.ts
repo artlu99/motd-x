@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { LmdisClient } from "../src/server/lmdis/sdk";
 import { AuthStore } from "../src/server/auth-store";
 import type { AuthAttempt, XUser } from "../src/server/auth-store";
@@ -602,5 +602,213 @@ describe("createAuthApp", () => {
     expect(firstAttempt).not.toBeNull();
     expect(secondAttempt).not.toBeNull();
     expect(firstAttempt!.state).not.toBe(secondAttempt!.state);
+  });
+});
+
+describe("AuthStore.resolveSession", () => {
+  it("resolves a raw session token to its user id", async () => {
+    const store = new AuthStore(makeFakeLmdis().client);
+    const raw = "raw-session-token-for-resolve";
+    await store.saveSession(await sha256hex(raw), "123", 1000, 9999999999999);
+
+    expect(await store.resolveSession(raw)).toBe("123");
+    expect(await store.resolveSession("wrong-token")).toBeNull();
+  });
+});
+
+describe("confidential client support and failure diagnostics", () => {
+  const secret = "s3cr3t";
+
+  const tokenCallFor = async (
+    depsOverride: Partial<Parameters<typeof createAuthApp>[0]>,
+  ): Promise<{ headers: Record<string, string>; status: number; html: string }> => {
+    const lmdis = makeFakeLmdis();
+    const x = makeXApi();
+    const store = new AuthStore(lmdis.client);
+    const app = createAuthApp({
+      store,
+      xApi: x.xApi,
+      clientId: CLIENT_ID,
+      ...depsOverride,
+    });
+    const body = await start(app, "standalone");
+    const state = new URL(body.authorize_url).searchParams.get("state") ?? "";
+    const res = await app.request(`${ORIGIN}/auth/callback?code=C1&state=${state}`);
+    const tokenCall = x.calls.find((c) => c.url === "https://api.x.com/2/oauth2/token")!;
+    return {
+      headers: (tokenCall.init?.headers ?? {}) as Record<string, string>,
+      status: res.status,
+      html: await res.text(),
+    };
+  };
+
+  it("sends Basic client auth on the token exchange when a client secret is configured", async () => {
+    const { headers } = await tokenCallFor({ clientSecret: secret });
+    const expected =
+      "Basic " + btoa(`${encodeURIComponent(CLIENT_ID)}:${encodeURIComponent(secret)}`);
+    expect(headers["authorization"]).toBe(expected);
+  });
+
+  it("omits Authorization on the token exchange for public clients", async () => {
+    const { headers } = await tokenCallFor({});
+    expect(headers["authorization"]).toBeUndefined();
+  });
+
+  it("surfaces X's error redirect on the failure page without calling the X API", async () => {
+    const { app, x } = makeApp();
+    const res = await app.request(
+      `${ORIGIN}/auth/callback?error=access_denied&error_description=denied%20by%20user`,
+    );
+    expect(res.status).toBe(400);
+    const html = await res.text();
+    expect(html).toContain("Sign-in could not be completed");
+    expect(html).toContain("access_denied");
+    expect(html).toContain("denied by user");
+    expect(x.calls).toHaveLength(0);
+  });
+
+  it("surfaces the token endpoint failure reason on the failure page", async () => {
+    const lmdis = makeFakeLmdis();
+    const failingX = async (url: string): Promise<Response> => {
+      if (url === "https://api.x.com/2/oauth2/token") {
+        return Response.json({ error: "invalid_client" }, { status: 401 });
+      }
+      return Response.json({ data: { id: "1", username: "u", name: "U" } });
+    };
+    const store = new AuthStore(lmdis.client);
+    const app = createAuthApp({ store, xApi: failingX, clientId: CLIENT_ID });
+
+    const body = await start(app, "iframe");
+    const state = new URL(body.authorize_url).searchParams.get("state") ?? "";
+    const res = await app.request(`${ORIGIN}/auth/callback?code=X&state=${state}`);
+
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain("invalid_client");
+  });
+});
+
+describe("profile lookup failure diagnostics", () => {
+  it("completes sign-in with a synthetic friend identity when the profile lookup fails", async () => {
+    const lmdis = makeFakeLmdis();
+    const x = async (url: string): Promise<Response> => {
+      if (url === "https://api.x.com/2/oauth2/token") {
+        return Response.json({ access_token: "AT-1" });
+      }
+      return Response.json(
+        { detail: "Forbidden", title: "Client Forbidden", reason: "client-not-enrolled" },
+        { status: 403 },
+      );
+    };
+    const store = new AuthStore(lmdis.client);
+    const app = createAuthApp({ store, xApi: x, clientId: CLIENT_ID });
+
+    const body = await start(app, "iframe");
+    const state = new URL(body.authorize_url).searchParams.get("state") ?? "";
+    const res = await app.request(`${ORIGIN}/auth/callback?code=X&state=${state}`);
+
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("signed in");
+    const attempt = await store.getAttemptByState(state);
+    expect(attempt!.status).toBe("completed");
+    expect(attempt!.user_id).toBe("unknown");
+    expect(await store.getUser("unknown")).toEqual({
+      id: "unknown",
+      username: "friend",
+      name: "friend",
+    });
+    const pollBody = await poll(app, body.poll_token);
+    expect(pollBody.status).toBe("completed");
+    expect(pollBody.user).toEqual({ id: "unknown", username: "friend", name: "friend" });
+    if (typeof pollBody.session_token === "string") {
+      expect(await store.resolveSession(pollBody.session_token)).toBe("unknown");
+    }
+  });
+});
+
+describe("auth checkpoint logging", () => {
+  const eventsOf = (spy: { mock: { calls: unknown[][] } }): Array<Record<string, any>> =>
+    spy.mock.calls
+      .map((c) => {
+        try {
+          return JSON.parse(String(c[0])) as Record<string, any>;
+        } catch {
+          return null;
+        }
+      })
+      .filter((e): e is Record<string, any> => e !== null);
+
+  it("logs structured checkpoints through the standalone happy path", async () => {
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    const { app, store } = makeApp();
+    const body = await start(app, "standalone");
+    const state = new URL(body.authorize_url).searchParams.get("state") ?? "";
+    await app.request(`${ORIGIN}/auth/callback?code=C9&state=${state}`);
+    await poll(app, body.poll_token);
+
+    const events = [...eventsOf(logSpy), ...eventsOf(errSpy)];
+    expect(events.some((e) => e.evt === "auth.start" && e.context === "standalone")).toBe(true);
+    expect(events.some((e) => e.evt === "auth.callback" && e.has_code === true)).toBe(true);
+    expect(events.some((e) => e.evt === "auth.token" && e.status === 200)).toBe(true);
+    expect(events.some((e) => e.evt === "auth.profile" && e.status === 200)).toBe(true);
+    const done = events.find((e) => e.evt === "auth.complete")!;
+    expect(done.username).toBe("alice");
+    expect(done.synthetic).toBe(false);
+    expect(JSON.stringify(events)).not.toContain("AT-1");
+    expect(JSON.stringify(events)).not.toContain(body.poll_token);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("logs failures with the upstream reason at the failing checkpoint", async () => {
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    const lmdis = makeFakeLmdis();
+    const failingX = async (url: string): Promise<Response> => {
+      if (url === "https://api.x.com/2/oauth2/token") {
+        return Response.json({ error: "invalid_client" }, { status: 401 });
+      }
+      return Response.json({ data: { id: "1", username: "u", name: "U" } });
+    };
+    const store = new AuthStore(lmdis.client);
+    const app = createAuthApp({ store, xApi: failingX, clientId: CLIENT_ID });
+
+    const body = await start(app, "iframe");
+    const state = new URL(body.authorize_url).searchParams.get("state") ?? "";
+    await app.request(`${ORIGIN}/auth/callback?code=X&state=${state}`);
+
+    const events = [...eventsOf(logSpy), ...eventsOf(errSpy)];
+    const failure = events.find((e) => e.evt === "auth.callback.failed")!;
+    expect(failure.reason).toBe("invalid_client");
+    expect(events.some((e) => e.evt === "auth.profile")).toBe(false);
+    logSpy.mockRestore();
+    errSpy.mockRestore();
+  });
+
+  it("logs the synthetic fallback when the profile lookup fails", async () => {
+    const logSpy = spyOn(console, "log").mockImplementation(() => {});
+    const errSpy = spyOn(console, "error").mockImplementation(() => {});
+    const lmdis = makeFakeLmdis();
+    const x = async (url: string): Promise<Response> => {
+      if (url === "https://api.x.com/2/oauth2/token") return Response.json({ access_token: "AT-9" });
+      return Response.json({ reason: "client-not-enrolled" }, { status: 403 });
+    };
+    const store = new AuthStore(lmdis.client);
+    const app = createAuthApp({ store, xApi: x, clientId: CLIENT_ID });
+
+    const body = await start(app, "standalone");
+    const state = new URL(body.authorize_url).searchParams.get("state") ?? "";
+    await app.request(`${ORIGIN}/auth/callback?code=C&state=${state}`);
+
+    const events = [...eventsOf(logSpy), ...eventsOf(errSpy)];
+    const profileFail = events.find((e) => e.evt === "auth.profile.failed")!;
+    expect(profileFail.status).toBe(403);
+    expect(profileFail.reason).toBe("client-not-enrolled");
+    const done = events.find((e) => e.evt === "auth.complete")!;
+    expect(done.synthetic).toBe(true);
+    expect(done.username).toBe("friend");
+    logSpy.mockRestore();
+    errSpy.mockRestore();
   });
 });

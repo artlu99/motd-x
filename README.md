@@ -1,8 +1,11 @@
 # motd_x
 
-Daily message service for an X Player Card app. Serves a Gospel reading
-(bible-api.com, cached in lmdis) that can be overridden by a message-of-the-day
-(MOTD) markdown document stored in lmdis.
+Daily message service for an X Player Card app. Serves the Church's daily
+Gospel reading (Roman Catholic lectionary via
+[cpbjr/catholic-readings-api](https://github.com/cpbjr/catholic-readings-api),
+cached in lmdis) that can be overridden by a message-of-the-day (MOTD)
+markdown document. Friends of the owner get a personalized tier after signing
+in with X.
 
 Stack: Hono on Cloudflare Workers, lmdis (self-hosted, bearer auth) as the
 only data store.
@@ -124,6 +127,35 @@ Setup:
    ```
    Then `bun run gen:types` (the generator reads deployed secret names into
    `Env`) and `bun run deploy`.
+
+## Friends tier
+
+Viewers who sign in with X (button on `/play`) are checked against a friends
+set in lmdis. All signed-in viewers get the greeting — `Hello {username} I
+see you 👀` (handle falls back to `friend` if the profile lookup fails).
+Friends additionally receive the friends MOTD for the day when one exists.
+
+```bash
+# add a friend (X user id or username both work)
+curl -sS -X POST "$LMDIS_URL/" -H "Authorization: Bearer $LMDIS_REST_TOKEN" \
+  -H "Content-Type: application/json" -d '["SADD","motd-x:daily:v1:friends","alice"]'
+
+# remove
+... -d '["SDEL","motd-x:daily:v1:friends","alice"]'
+
+# inspect
+... -d '["SMEMB","motd-x:daily:v1:friends"]'
+```
+
+Friends-specific MOTD (key suffix `:friends`, same two-POST pointer pattern):
+
+- pointer: `motd-x:daily:v1:motd:{day}:friends` → `{"version","markdown"}`
+- archive: `motd-x:daily:v1:motd:{day}:friends:{epoch-ms}` → raw markdown
+
+`{username}` in any served MOTD markdown is replaced with the signed-in
+viewer's username. Content resolution: signed-in friends → friends MOTD →
+greeting; signed-in non-friends → greeting; signed-out → public MOTD →
+Gospel.
 
 ## Uploading a MOTD (out-of-band)
 

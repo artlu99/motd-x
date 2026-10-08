@@ -13,6 +13,7 @@ export type AuthDeps = {
   store: AuthStore;
   xApi: (url: string, init?: RequestInit) => Promise<Response>;
   clientId: string;
+  clientSecret?: string;
   now?: () => Date;
 };
 
@@ -36,6 +37,16 @@ const sha256hex = async (input: string): Promise<string> => {
 const s256Challenge = async (verifier: string): Promise<string> =>
   base64url(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier))));
 
+const logAuth = (
+  evt: string,
+  fields: Record<string, unknown>,
+  level: "log" | "error" = "log",
+): void => {
+  const line = JSON.stringify({ evt, ...fields });
+  if (level === "error") console.error(line);
+  else console.log(line);
+};
+
 const parseXUser = (value: unknown): XUser | null => {
   if (typeof value !== "object" || value === null) return null;
   const row = value as Record<string, unknown>;
@@ -51,8 +62,13 @@ const parseXUser = (value: unknown): XUser | null => {
   return user;
 };
 
-const failurePage = (): string =>
-  `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Sign-in failed</title></head><body><p>Sign-in could not be completed.</p><p><a href="/play">Try again</a></p></body></html>`;
+const escapeReason = (reason: string): string =>
+  reason.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+const failurePage = (reason?: string): string =>
+  `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Sign-in failed</title></head><body><p>Sign-in could not be completed.</p>${
+    reason ? `<p>Reason: ${escapeReason(reason)}</p>` : ""
+  }<p><a href="/play">Try again</a></p></body></html>`;
 
 const iframeSuccessPage = (): string =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Signed in</title></head><body><p>You are signed in — closing…</p><script>window.close();</script></body></html>`;
@@ -93,27 +109,54 @@ export function createAuthApp(deps: AuthDeps): Hono {
       created_at: nowMs,
       expires_at: nowMs + ATTEMPT_TTL_MS,
     });
+    logAuth("auth.start", { context, attempt_ttl_ms: ATTEMPT_TTL_MS });
     return c.json({ authorize_url: authorizeUrl, poll_token: pollToken });
   });
 
   app.get("/auth/callback", async (c) => {
+    const xError = c.req.query("error");
+    logAuth("auth.callback", {
+      has_code: (c.req.query("code") ?? "") !== "",
+      has_state: (c.req.query("state") ?? "") !== "",
+      error: xError || undefined,
+    }, xError ? "error" : "log");
+    if (xError !== undefined && xError !== "") {
+      const description = c.req.query("error_description") ?? "";
+      const reason = `${xError}${description ? `: ${description}` : ""}`;
+      logAuth("auth.callback.failed", { reason }, "error");
+      return c.html(failurePage(reason), 400);
+    }
     const state = c.req.query("state") ?? "";
     const code = c.req.query("code") ?? "";
     const attempt = state === "" ? null : await deps.store.getAttemptByState(state);
+    logAuth("auth.state", {
+      found: attempt !== null,
+      status: attempt?.status ?? null,
+    }, attempt && attempt.status === "pending" ? "log" : "error");
     if (attempt === null || attempt.status !== "pending") {
-      return c.html(failurePage(), 400);
+      return c.html(failurePage("unknown or expired sign-in attempt"), 400);
     }
     if (!(await deps.store.claimCallback(state))) {
-      return c.html(failurePage(), 400);
+      logAuth("auth.claim", { won: false }, "error");
+      return c.html(failurePage("sign-in attempt already completed"), 400);
     }
-    const fail = async (): Promise<Response> => {
+    const fail = async (reason: string): Promise<Response> => {
+      logAuth("auth.callback.failed", { reason }, "error");
       await deps.store.releaseCallback(state);
-      return c.html(failurePage(), 400);
+      return c.html(failurePage(reason), 400);
     };
     const origin = new URL(c.req.url).origin;
+    const tokenHeaders: Record<string, string> = {
+      "content-type": "application/x-www-form-urlencoded",
+    };
+    if (deps.clientSecret !== undefined) {
+      tokenHeaders.authorization =
+        "Basic " +
+        btoa(`${encodeURIComponent(deps.clientId)}:${encodeURIComponent(deps.clientSecret)}`);
+    }
     const tokenRes = await deps.xApi(TOKEN_ENDPOINT, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded" },
+      headers: tokenHeaders,
       body: new URLSearchParams({
         grant_type: "authorization_code",
         code,
@@ -122,22 +165,54 @@ export function createAuthApp(deps: AuthDeps): Hono {
         code_verifier: attempt.code_verifier,
       }),
     });
-    if (!tokenRes.ok) return fail();
+    logAuth("auth.token", { status: tokenRes.status }, tokenRes.ok ? "log" : "error");
+    if (!tokenRes.ok) {
+      const detail = (await tokenRes.json().catch(() => null)) as { error?: unknown } | null;
+      const reason =
+        typeof detail?.error === "string"
+          ? detail.error
+          : `token request failed with status ${tokenRes.status}`;
+      return fail(reason);
+    }
     const tokenBody = (await tokenRes.json().catch(() => null)) as {
       access_token?: unknown;
     } | null;
     const accessToken =
       typeof tokenBody?.access_token === "string" ? tokenBody.access_token : null;
-    if (accessToken === null) return fail();
+    if (accessToken === null) return fail("token response contained no access_token");
     const meRes = await deps.xApi(USERS_ME_ENDPOINT, {
       headers: { authorization: `Bearer ${accessToken}` },
     });
-    if (!meRes.ok) return fail();
-    const meBody = (await meRes.json().catch(() => null)) as { data?: unknown } | null;
-    const user = parseXUser(meBody?.data);
-    if (user === null) return fail();
+    let user: XUser | null = null;
+    if (meRes.ok) {
+      const meBody = (await meRes.json().catch(() => null)) as { data?: unknown } | null;
+      user = parseXUser(meBody?.data);
+    }
+    logAuth("auth.profile", { status: meRes.status }, meRes.ok ? "log" : "error");
+    let synthetic = false;
+    if (user === null) {
+      const meDetail = meRes.ok
+        ? null
+        : ((await meRes.json().catch(() => null)) as Record<string, unknown> | null);
+      logAuth("auth.profile.failed", {
+        status: meRes.status,
+        reason: typeof meDetail?.reason === "string" ? meDetail.reason : null,
+        title: typeof meDetail?.title === "string" ? meDetail.title : null,
+        detail: typeof meDetail?.detail === "string" ? meDetail.detail : null,
+        type: typeof meDetail?.type === "string" ? meDetail.type : null,
+        registration_url:
+          typeof meDetail?.registration_url === "string" ? meDetail.registration_url : null,
+      }, "error");
+      synthetic = true;
+      user = { id: "unknown", username: "friend", name: "friend" };
+    }
     await deps.store.completeAttempt(state, user.id);
     await deps.store.upsertUser(user);
+    logAuth("auth.complete", {
+      username: user.username,
+      synthetic,
+      context: attempt.context,
+    });
     if (attempt.context === "standalone") {
       const sessionToken = randomToken();
       const nowMs = now().getTime();
@@ -156,6 +231,7 @@ export function createAuthApp(deps: AuthDeps): Hono {
     const token = c.req.query("token") ?? "";
     const attempt = token === "" ? null : await deps.store.getAttemptByPollToken(token);
     if (attempt === null || attempt.status === "expired") {
+      logAuth("auth.poll", { found: attempt !== null, status: "expired" });
       return c.json({ status: "expired" });
     }
     if (attempt.status === "pending") {

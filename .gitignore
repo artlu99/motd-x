@@ -5,5 +5,5 @@ dist/
 .dev.vars
 bun.lock
 AGENTS.md
-.claude/
-worker-configuration.d.ts
+.claude/skills/*-workspace/
+worker-configuration.d.ts.bak

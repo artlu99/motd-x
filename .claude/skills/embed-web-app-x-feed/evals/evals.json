@@ -1,0 +1,50 @@
+{
+  "skill_name": "embed-web-app-x-feed",
+  "evals": [
+    {
+      "id": 0,
+      "eval_name": "full-poll-app",
+      "prompt": "Build me a poll app that runs inside an X post. When I share a link in a tweet, readers should see a live poll right in the timeline, sign in with their X account, cast one vote per account (changing your vote updates it), and see running results. Use Cloudflare. Write the complete project as source files; do not install dependencies, build, or deploy.",
+      "expected_output": "A complete Vite+TS+Hono+Workers+D1 project with server-rendered twitter:player card meta on the share URL, a 480x480 player page, read-only results rendering, OAuth 2.0 PKCE sign-in with separate iframe (popup+poll) and standalone branches, one-vote-per-user upsert, and sessions issued by the backend.",
+      "files": [],
+      "expectations": [
+        "The share-URL page emits server-side-rendered <meta name=\"twitter:card\" content=\"player\"> (present in server code or served HTML, not only client JS)",
+        "Player card metadata includes twitter:player URL plus twitter:player:width and twitter:player:height (roughly square, e.g. 480x480)",
+        "Sign-in uses X OAuth 2.0 authorization code flow with PKCE: x.com/i/oauth2/authorize, code_challenge with S256 method, and state parameter",
+        "The iframe branch opens sign-in in a popup/separate tab and the card polls a backend endpoint (with a per-attempt token) to detect completion",
+        "One vote per user per poll is enforced at the database level (UNIQUE/PRIMARY KEY constraint) and re-voting upserts rather than duplicating",
+        "The X access token is used only server-side; the frontend receives a separate app session, never the X token"
+      ]
+    },
+    {
+      "id": 1,
+      "eval_name": "static-puzzle-embedding",
+      "prompt": "I made a little daily word puzzle \u2014 it's currently a static page (plain HTML/JS) I host on a domain. I want people to be able to play it right inside a tweet on X when I share the link, like an embedded mini-game. What do I need to change? Write the changed/new files for me; do not install dependencies, build, or deploy.",
+      "expected_output": "Explanation that a plain SPA's meta tags may not suffice / player card requires server-rendered meta; new meta tags (twitter:card=player, player URL, 480x480), a small player page wrapper, awareness of the sandboxed iframe context (storage may fail, compact layout), card image, cache-busting note, and validation steps. Should NOT needlessly add auth.",
+      "files": [],
+      "expectations": [
+        "Solution adds twitter:card=player meta plus a twitter:player URL pointing at the playable/embed page",
+        "Solution includes twitter:player:width and twitter:player:height metadata",
+        "Notes explain that X's crawler reads raw HTML meta tags and does not run JavaScript (server-rendered/static tags required)",
+        "The embed/player page handles the sandboxed iframe context: runtime storage probe or try/catch fallback, and a compact layout for a small fixed viewport",
+        "Notes mention X card metadata caching and how to re-validate/cache-bust after changing tags",
+        "Solution does NOT introduce OAuth/backend auth (unnecessary for a read-only puzzle); at most notes it as future work"
+      ]
+    },
+    {
+      "id": 2,
+      "eval_name": "existing-app-auth",
+      "prompt": "I already have a Hono app running on Cloudflare Workers that's embedded in tweets as an X player card (the card part works). Add 'sign in with X' so each verified user can claim one spot per day on a leaderboard \u2014 one claim per account, and they can see who claimed. Remember it runs inside the tweet iframe on x.com as well as standalone. Write just the new/changed files; do not install dependencies, build, or deploy.",
+      "expected_output": "OAuth 2.0 PKCE flow backend-only tokens, pending auth attempts table with poll tokens for the iframe branch (window.open + polling), standalone redirect branch with sessionStorage resume, users+sessions+claims schema with per-user-per-day uniqueness, security invariant that iframe context is not identity.",
+      "files": [],
+      "expectations": [
+        "Sign-in uses X OAuth 2.0 authorization code flow with PKCE (code_challenge S256, state)",
+        "Iframe branch: sign-in opens via popup/window.open and completion is detected by polling a backend endpoint with a per-attempt token (not by trusting iframe context, referrer, or iframe cookies)",
+        "Standalone branch: redirect-based sign-in that persists/resumes a pending attempt (e.g. sessionStorage) and returns to the app after the X callback",
+        "One claim per user per day is enforced server-side with a DB uniqueness mechanism (e.g. PRIMARY KEY including a server-computed day), not client logic",
+        "A public leaderboard endpoint returns claimed spots with profile info (username/name/avatar)",
+        "The X access token stays server-side; the frontend gets a separate app session token (hashed server-side), and pending attempts expire"
+      ]
+    }
+  ]
+}

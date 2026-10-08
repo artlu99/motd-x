@@ -1,5 +1,7 @@
 import { Hono } from "hono";
 import { pickDailyReference } from "./daily-reference";
+import { fetchGospelReference } from "./lectionary";
+import type { XUser } from "./auth-store";
 import type { DailyStore, MotdEntry, StoredReading } from "./store";
 
 const TRANSLATIONS: ReadonlySet<string> = new Set([
@@ -51,6 +53,16 @@ export interface AppDeps {
   store: DailyStore;
   fetcher: (url: string, init?: RequestInit) => Promise<Response>;
   now: () => Date;
+  auth?: {
+    resolveSession(raw: string): Promise<string | null>;
+    getUser(userId: string): Promise<XUser | null>;
+  };
+}
+
+interface PublicResult {
+  status: number;
+  body: Record<string, unknown>;
+  cacheControl: string;
 }
 
 function formatUtcDay(date: Date): string {
@@ -139,6 +151,129 @@ async function fetchNormalized(
   }
 }
 
+async function resolvePublic(
+  deps: AppDeps,
+  opts: { day: string; translation: string; verify: boolean; nowDate: Date },
+): Promise<PublicResult> {
+  const cacheControl = `public, s-maxage=${secondsUntilUtcMidnight(opts.nowDate)}`;
+
+  let motd: MotdEntry | null = null;
+  try {
+    motd = await deps.store.getMotd(opts.day, { verify: opts.verify });
+  } catch {
+    motd = null;
+  }
+  if (motd !== null) {
+    return {
+      status: 200,
+      body: {
+        day: opts.day,
+        source: "motd",
+        markdown: motd.markdown,
+        version: motd.version,
+        cached: false,
+        stale: false,
+      },
+      cacheControl,
+    };
+  }
+
+  let stored: StoredReading | null = null;
+  let cacheError: string | null = null;
+  try {
+    stored = await deps.store.get(opts.day, opts.translation);
+  } catch (e) {
+    cacheError = e instanceof Error ? e.message : String(e);
+  }
+  if (stored !== null) {
+    const payload = JSON.parse(stored.payload) as Record<string, unknown>;
+    return {
+      status: 200,
+      body: { ...payload, day: stored.day, source: "gospel", cached: true, stale: false },
+      cacheControl,
+    };
+  }
+
+  let reference: string | null = null;
+  try {
+    reference = await deps.store.getGospelReference(opts.day);
+  } catch {
+    reference = null;
+  }
+  if (reference === null) {
+    reference = await fetchGospelReference(deps.fetcher, opts.day);
+    if (reference !== null) {
+      try {
+        await deps.store.putGospelReference(opts.day, reference);
+      } catch {}
+    }
+  }
+  if (reference === null) {
+    reference = pickDailyReference(opts.day);
+  }
+  const normalized = await fetchNormalized(deps.fetcher, reference, opts.translation);
+
+  if (normalized !== null) {
+    try {
+      await deps.store.put({
+        day: opts.day,
+        translation: opts.translation,
+        reference: normalized.reference,
+        payload: JSON.stringify(normalized),
+        fetched_at: opts.nowDate.getTime(),
+      });
+    } catch {
+      cacheError ??= "cache write failed";
+    }
+    return {
+      status: 200,
+      body: { ...normalized, day: opts.day, source: "gospel", cached: false, stale: false },
+      cacheControl,
+    };
+  }
+
+  try {
+    const lastGood = await deps.store.getLatest();
+    if (lastGood !== null) {
+      const payload = JSON.parse(lastGood.payload) as Record<string, unknown>;
+      return {
+        status: 200,
+        body: { ...payload, day: lastGood.day, source: "gospel", cached: true, stale: true },
+        cacheControl,
+      };
+    }
+  } catch (e) {
+    cacheError = e instanceof Error ? e.message : String(e);
+  }
+
+  if (cacheError !== null) {
+    return {
+      status: 503,
+      body: { error: "cache_unavailable", message: `reading cache unavailable: ${cacheError}` },
+      cacheControl,
+    };
+  }
+  return { status: 502, body: { error: "upstream_unavailable" }, cacheControl };
+}
+
+function resolveDay(
+  c: { req: { query(name: string): string | undefined } },
+  nowDate: Date,
+): { day: string } | { status: number; body: Record<string, unknown> } {
+  const todayUtc = formatUtcDay(nowDate);
+  const dateParam = c.req.query("date");
+  if (dateParam === undefined) {
+    return { day: todayUtc };
+  }
+  if (!isValidCalendarDate(dateParam)) {
+    return { status: 400, body: { error: "invalid_date" } };
+  }
+  if (dateParam > todayUtc) {
+    return { status: 400, body: { error: "future_date" } };
+  }
+  return { day: dateParam };
+}
+
 export function createApp(deps: AppDeps): Hono {
   const app = new Hono({ strict: false });
 
@@ -149,101 +284,95 @@ export function createApp(deps: AppDeps): Hono {
     }
 
     const nowDate = deps.now();
-    const todayUtc = formatUtcDay(nowDate);
-
-    let day = todayUtc;
-    const dateParam = c.req.query("date");
-    if (dateParam !== undefined) {
-      if (!isValidCalendarDate(dateParam)) {
-        return c.json({ error: "invalid_date" }, 400);
-      }
-      if (dateParam > todayUtc) {
-        return c.json({ error: "future_date" }, 400);
-      }
-      day = dateParam;
+    const day = resolveDay(c, nowDate);
+    if ("status" in day) {
+      return c.json(day.body, day.status as 400);
     }
 
-    const cacheControl = `public, s-maxage=${secondsUntilUtcMidnight(nowDate)}`;
-    const respond = (
-      payload: Record<string, unknown> | NormalizedReading,
-      responseDay: string,
-      cached: boolean,
-      stale: boolean,
-    ) =>
-      c.json(
-        { ...payload, day: responseDay, source: "gospel", cached, stale },
-        200,
-        { "cache-control": cacheControl },
-      );
+    const result = await resolvePublic(deps, {
+      day: day.day,
+      translation,
+      verify: c.req.query("verify") === "1",
+      nowDate,
+    });
+    return c.json(result.body, result.status as 200, {
+      "cache-control": `public, max-age=0, s-maxage=${
+        secondsUntilUtcMidnight(nowDate)
+      }`,
+    });
+  });
 
-    let motd: MotdEntry | null = null;
+  app.use("/api/daily/me", async (c, next) => {
+    await next();
+    c.header("cache-control", "private, no-store");
+  });
+
+  app.get("/api/daily/me", async (c) => {
+    const header = c.req.header("authorization") ?? "";
+    const raw = header.startsWith("Bearer ") ? header.slice(7) : "";
+    if (!deps.auth || raw === "") {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    let userId: string | null = null;
     try {
-      motd = await deps.store.getMotd(day, { verify: c.req.query("verify") === "1" });
+      userId = await deps.auth.resolveSession(raw);
     } catch {
-      motd = null;
+      userId = null;
     }
-    if (motd !== null) {
-      return c.json(
-        {
-          day,
+    if (userId === null) {
+      return c.json({ error: "unauthorized" }, 401);
+    }
+    let username = "friend";
+    try {
+      const user = await deps.auth.getUser(userId);
+      if (user !== null) username = user.username;
+    } catch {}
+
+    const day = resolveDay(c, deps.now());
+    if ("status" in day) {
+      return c.json(day.body, day.status as 400);
+    }
+
+    let isFriend = false;
+    try {
+      isFriend =
+        (await deps.store.isFriend(userId)) || (await deps.store.isFriend(username));
+    } catch {
+      isFriend = false;
+    }
+
+    if (isFriend) {
+      let entry: MotdEntry | null = null;
+      try {
+        entry = await deps.store.getFriendsMotd(day.day);
+      } catch {
+        entry = null;
+      }
+      if (entry !== null) {
+        console.log(JSON.stringify({ evt: "me.tier", audience: "friend", user_id: userId }));
+        return c.json({
+          day: day.day,
           source: "motd",
-          markdown: motd.markdown,
-          version: motd.version,
+          markdown: entry.markdown.replaceAll("{username}", username),
+          version: entry.version,
+          audience: "friend",
           cached: false,
           stale: false,
-        },
-        200,
-        { "cache-control": cacheControl },
-      );
-    }
-
-    let stored: StoredReading | null = null;
-    let cacheError: string | null = null;
-    try {
-      stored = await deps.store.get(day, translation);
-    } catch (e) {
-      cacheError = e instanceof Error ? e.message : String(e);
-    }
-    if (stored !== null) {
-      const payload = JSON.parse(stored.payload) as Record<string, unknown>;
-      return respond(payload, stored.day, true, false);
-    }
-
-    const reference = pickDailyReference(day);
-    const normalized = await fetchNormalized(deps.fetcher, reference, translation);
-
-    if (normalized !== null) {
-      try {
-        await deps.store.put({
-          day,
-          translation,
-          reference: normalized.reference,
-          payload: JSON.stringify(normalized),
-          fetched_at: nowDate.getTime(),
         });
-      } catch {
-        cacheError ??= "cache write failed";
       }
-      return respond(normalized, day, false, false);
     }
 
-    try {
-      const lastGood = await deps.store.getLatest();
-      if (lastGood !== null) {
-        const payload = JSON.parse(lastGood.payload) as Record<string, unknown>;
-        return respond(payload, lastGood.day, true, true);
-      }
-    } catch (e) {
-      cacheError = e instanceof Error ? e.message : String(e);
-    }
-
-    if (cacheError !== null) {
-      return c.json(
-        { error: "cache_unavailable", message: `reading cache unavailable: ${cacheError}` },
-        503,
-      );
-    }
-    return c.json({ error: "upstream_unavailable" }, 502);
+    const audience = isFriend ? "friend" : "greeting";
+    console.log(JSON.stringify({ evt: "me.tier", audience, user_id: userId }));
+    return c.json({
+      day: day.day,
+      source: "motd",
+      markdown: `Hello ${username} I see you 👀`,
+      version: "greeting",
+      audience,
+      cached: false,
+      stale: false,
+    });
   });
 
   return app;

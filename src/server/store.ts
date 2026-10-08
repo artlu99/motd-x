@@ -16,4 +16,8 @@ export interface DailyStore {
   getLatest(): Promise<StoredReading | null>;
   put(row: StoredReading): Promise<void>;
   getMotd(day: string, opts?: { verify?: boolean }): Promise<MotdEntry | null>;
+  getFriendsMotd(day: string): Promise<MotdEntry | null>;
+  isFriend(identifier: string): Promise<boolean>;
+  getGospelReference(day: string): Promise<string | null>;
+  putGospelReference(day: string, reference: string): Promise<void>;
 }

@@ -6,7 +6,7 @@ import { LmdisDailyStore } from "./lmdis-store";
 import { LmdisClient } from "./lmdis/sdk";
 import { playerHtml } from "./player";
 
-type Bindings = Env;
+type Bindings = Env & { X_CLIENT_SECRET?: string };
 
 const workerFetch = ((input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
   fetch(input, init)) as unknown as typeof fetch;
@@ -34,6 +34,14 @@ const authStore = (c: { env: Bindings }): AuthStore =>
     }),
     { now: () => new Date() },
   );
+
+const authDeps = (c: { env: Bindings }) => ({
+  store: authStore(c),
+  xApi: workerFetch,
+  clientId: c.env.X_CLIENT_ID,
+  clientSecret: c.env.X_CLIENT_SECRET,
+  now: () => new Date(),
+});
 
 const app = new Hono<{ Bindings: Bindings }>({ strict: false });
 
@@ -71,23 +79,23 @@ code { background: #f2f2f2; padding: 0.1em 0.35em; border-radius: 4px; }
 );
 
 app.get("/play", (c) =>
-  c.html(playerHtml(), 200, { "content-security-policy": FRAME_ANCESTORS }),
+  c.html(playerHtml(), 200, {
+    "content-security-policy": FRAME_ANCESTORS,
+    "cache-control": "private, no-store",
+  }),
 );
 
-app.all("/auth/*", (c) =>
-  createAuthApp({
-    store: authStore(c),
-    xApi: workerFetch,
-    clientId: c.env.X_CLIENT_ID,
-  }).fetch(c.req.raw),
-);
+app.all("/auth/*", (c) => createAuthApp(authDeps(c)).fetch(c.req.raw));
 
-app.all("/api/daily", (c) =>
+const dailyHandler = (c: { env: Bindings; req: { raw: Request } }) =>
   createApp({
     store: store(c),
     fetcher: workerFetch,
     now: () => new Date(),
-  }).fetch(c.req.raw),
-);
+    auth: authStore(c),
+  }).fetch(c.req.raw);
+
+app.all("/api/daily", dailyHandler);
+app.all("/api/daily/*", dailyHandler);
 
 export default app;

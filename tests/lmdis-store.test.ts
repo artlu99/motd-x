@@ -277,3 +277,41 @@ describe("LmdisDailyStore.getMotd", () => {
     await expect(store.getMotd("2026-10-07")).rejects.toBeInstanceOf(LmdisError);
   });
 });
+
+describe("LmdisDailyStore friends tier", () => {
+  it("isFriend matches ids and usernames against the friends set", async () => {
+    const { client, calls } = makeClient([["alice", "123"], ["alice", "123"], ["alice", "123"]]);
+    const store = new LmdisDailyStore(client);
+
+    expect(await store.isFriend("123")).toBe(true);
+    expect(await store.isFriend("alice")).toBe(true);
+    expect(await store.isFriend("bob")).toBe(false);
+    expect(calls[0]).toEqual(["SMEMB", "motd-x:daily:v1:friends"]);
+  });
+
+  it("isFriend returns false when the set is empty or missing", async () => {
+    const { client } = makeClient([[]]);
+    const store = new LmdisDailyStore(client);
+
+    expect(await store.isFriend("123")).toBe(false);
+  });
+
+  it("getFriendsMotd reads the friends pointer key", async () => {
+    const { client, calls } = makeClient([{ version: "1791479000000", markdown: "# friends only" }]);
+    const store = new LmdisDailyStore(client);
+
+    const entry = await store.getFriendsMotd("2026-10-07");
+
+    expect(entry).toEqual({ version: "1791479000000", markdown: "# friends only" });
+    expect(calls).toEqual([["GET", "motd-x:daily:v1:motd:2026-10-07:friends"]]);
+  });
+
+  it("getFriendsMotd returns null on a missing pointer with nothing archived", async () => {
+    const { client, calls } = makeClient([null, []]);
+    const store = new LmdisDailyStore(client);
+
+    expect(await store.getFriendsMotd("2026-10-07")).toBeNull();
+    expect(calls[0]).toEqual(["GET", "motd-x:daily:v1:motd:2026-10-07:friends"]);
+    expect(calls[1]).toEqual(["KEYS", "motd-x:daily:v1:motd:2026-10-07:friends:*"]);
+  });
+});

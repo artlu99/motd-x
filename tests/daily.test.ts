@@ -14,7 +14,8 @@ function now(): Date {
   return new Date("2026-10-07T12:00:00Z");
 }
 
-function createInMemoryStore(): DailyStore {
+function createInMemoryStore(gospelRefs?: Map<string, string>): DailyStore {
+  const refs = gospelRefs ?? new Map<string, string>();
   const rows = new Map<string, StoredReading>();
   return {
     async get(day: string, translation: string): Promise<StoredReading | null> {
@@ -34,6 +35,18 @@ function createInMemoryStore(): DailyStore {
     },
     async getMotd(): Promise<MotdEntry | null> {
       return null;
+    },
+    async getFriendsMotd(): Promise<MotdEntry | null> {
+      return null;
+    },
+    async isFriend(): Promise<boolean> {
+      return false;
+    },
+    async getGospelReference(day: string): Promise<string | null> {
+      return refs.get(day) ?? null;
+    },
+    async putGospelReference(day: string, reference: string): Promise<void> {
+      refs.set(day, reference);
     },
   };
 }
@@ -179,7 +192,7 @@ describe("GET /api/daily", () => {
     expect(body.translation.id).toBe("web");
     expect(body.translation.name).toBe("World English Bible");
 
-    expect(stub.calls).toEqual([
+    expect(stub.calls.filter((u) => u.includes("bible-api.com"))).toEqual([
       `https://bible-api.com/${encodeURIComponent(pickDailyReference(DAY))}?translation=web`,
     ]);
 
@@ -201,9 +214,10 @@ describe("GET /api/daily", () => {
     await appB.request("/api/daily");
 
     expect(stubA.calls).toEqual(stubB.calls);
-    expect(stubA.calls[0]).toBe(
+    const bibleCallsA = stubA.calls.filter((u) => u.includes("bible-api.com"));
+    expect(bibleCallsA).toEqual([
       `https://bible-api.com/${encodeURIComponent(pickDailyReference(DAY))}?translation=web`,
-    );
+    ]);
   });
 
   it("serves from cache on second request", async () => {
@@ -221,7 +235,7 @@ describe("GET /api/daily", () => {
     expect(body.cached).toBe(true);
     expect(body.stale).toBe(false);
     expect(body.day).toBe(DAY);
-    expect(stub.calls.length).toBe(1);
+    expect(stub.calls.filter((u) => u.includes("bible-api.com"))).toHaveLength(1);
   });
 
   it("respects ?date and ?translation for past days", async () => {
@@ -236,9 +250,10 @@ describe("GET /api/daily", () => {
     expect(body.day).toBe("2026-10-05");
     expect(body.translation.id).toBe("kjv");
 
-    expect(stub.calls.length).toBe(1);
-    expect(stub.calls[0]!.startsWith("https://bible-api.com/")).toBe(true);
-    expect(stub.calls[0]!.endsWith("translation=kjv")).toBe(true);
+    expect(stub.calls.filter((u) => u.includes("bible-api.com"))).toHaveLength(1);
+    const bibleCalls = stub.calls.filter((u) => u.includes("bible-api.com"));
+    expect(bibleCalls[0]!.startsWith("https://bible-api.com/")).toBe(true);
+    expect(bibleCalls[0]!.endsWith("translation=kjv")).toBe(true);
 
     expect(await store.get("2026-10-05", "kjv")).not.toBeNull();
     expect(await store.get(DAY, "web")).toBeNull();
@@ -283,7 +298,7 @@ describe("GET /api/daily", () => {
     expect(body.cached).toBe(true);
     expect(body.day).toBe("2026-10-06");
     expect(body.reference).toBe("John 3:16");
-    expect(stub.calls.length).toBe(1);
+    expect(stub.calls.filter((u) => u.includes("bible-api.com"))).toHaveLength(1);
   });
 
   it("falls back to last-good reading when the fetcher rejects", async () => {
@@ -351,6 +366,18 @@ describe("GET /api/daily when the store fails", () => {
         if (opts.motdThrows) throw new Error(CACHE_DOWN);
         return null;
       },
+      async getGospelReference(): Promise<string | null> {
+        return null;
+      },
+      async putGospelReference(): Promise<void> {},
+      async getFriendsMotd(): Promise<MotdEntry | null> {
+        if (opts.motdThrows) throw new Error(CACHE_DOWN);
+        return null;
+      },
+      async isFriend(): Promise<boolean> {
+        if (opts.motdThrows) throw new Error(CACHE_DOWN);
+        return false;
+      },
     };
   }
 
@@ -369,7 +396,7 @@ describe("GET /api/daily when the store fails", () => {
     expect(body.cached).toBe(false);
     expect(body.stale).toBe(false);
     expect(body.reference).toBe(pickDailyReference(DAY));
-    expect(stub.calls).toEqual([
+    expect(stub.calls.filter((u) => u.includes("bible-api.com"))).toEqual([
       `https://bible-api.com/${encodeURIComponent(pickDailyReference(DAY))}?translation=web`,
     ]);
   });
@@ -397,6 +424,10 @@ describe("GET /api/daily when the store fails", () => {
       getLatest: () => healthy.getLatest(),
       put: () => Promise.reject(new Error(CACHE_DOWN)),
       getMotd: () => Promise.reject(new Error(CACHE_DOWN)),
+      getFriendsMotd: () => Promise.reject(new Error(CACHE_DOWN)),
+      isFriend: () => Promise.reject(new Error(CACHE_DOWN)),
+      getGospelReference: () => Promise.reject(new Error(CACHE_DOWN)),
+      putGospelReference: () => Promise.reject(new Error(CACHE_DOWN)),
     };
     const stub = htmlNotFoundFetcher();
     const app = createApp({ store, fetcher: stub.fetcher, now });
@@ -445,7 +476,7 @@ describe("GET /api/daily message-of-the-day override", () => {
     const body = (await res.json()) as Record<string, any>;
     expect(body.source).toBe("gospel");
     expect(body.reference).toBe(pickDailyReference(DAY));
-    expect(stub.calls).toEqual([
+    expect(stub.calls.filter((u) => u.includes("bible-api.com"))).toEqual([
       `https://bible-api.com/${encodeURIComponent(pickDailyReference(DAY))}?translation=web`,
     ]);
   });
@@ -490,6 +521,10 @@ describe("GET /api/daily message-of-the-day override", () => {
       getLatest: () => Promise.resolve(null),
       put: () => Promise.resolve(),
       getMotd: () => Promise.reject(new Error(DOWN)),
+      getFriendsMotd: () => Promise.reject(new Error(DOWN)),
+      isFriend: () => Promise.reject(new Error(DOWN)),
+      getGospelReference: () => Promise.reject(new Error(DOWN)),
+      putGospelReference: () => Promise.reject(new Error(DOWN)),
     };
     const app = createApp({ store, fetcher: stub.fetcher, now });
 
@@ -556,5 +591,103 @@ describe("GET /api/daily trailing slash tolerance", () => {
 
     const body = (await res.json()) as Record<string, any>;
     expect(body.source).toBe("gospel");
+  });
+});
+
+function routingFetcher(opts: { lectionary?: object; lectionaryStatus?: number }) {
+  const calls: string[] = [];
+  const fetcher = async (url: string): Promise<Response> => {
+    calls.push(url);
+    if (url.includes("catholic-readings-api")) {
+      return new Response(JSON.stringify(opts.lectionary ?? {}), {
+        status: opts.lectionaryStatus ?? 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    const ref = /bible-api\.com\/([^?]*)/.exec(url)![1]!;
+    return new Response(
+      JSON.stringify({
+        reference: decodeURIComponent(ref),
+        verses: [{ book_id: "LUK", book_name: "Luke", chapter: 10, verse: 38, text: " verse " }],
+        text: " verse ",
+        translation_id: "web",
+        translation_name: "World English Bible",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  };
+  return { calls, fetcher };
+}
+
+describe("lectionary gospel source", () => {
+  it("serves the lectionary gospel on cache miss and caches its reference", async () => {
+    const refs = new Map<string, string>();
+    const routing = routingFetcher({ lectionary: { readings: { gospel: "Luke 10:38-42" } } });
+    const app = createApp({ store: createInMemoryStore(refs), fetcher: routing.fetcher, now });
+
+    const res = await app.request("/api/daily");
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as Record<string, any>;
+    expect(body.source).toBe("gospel");
+    expect(String(body.reference).toLowerCase()).toBe("luke 10:38-42");
+    expect(routing.calls[0]).toBe(
+      "https://cpbjr.github.io/catholic-readings-api/readings/2026/10-07.json",
+    );
+    const bibleCalls = routing.calls.filter((u) => u.includes("bible-api.com"));
+    expect(bibleCalls[0]).toContain(encodeURIComponent("luke 10:38-42"));
+    expect(refs.get(DAY)).toBe("luke 10:38-42");
+  });
+
+  it("prefers a cached gospel reference without refetching the lectionary", async () => {
+    const refs = new Map<string, string>([[DAY, "john 21:15-17"]]);
+    const routing = routingFetcher({ lectionary: { readings: { gospel: "Luke 10:38-42" } } });
+    const app = createApp({ store: createInMemoryStore(refs), fetcher: routing.fetcher, now });
+
+    const res = await app.request("/api/daily");
+    const body = (await res.json()) as Record<string, any>;
+    expect(String(body.reference).toLowerCase()).toBe("john 21:15-17");
+    expect(routing.calls.some((u) => u.includes("catholic-readings-api"))).toBe(false);
+  });
+
+  it("normalizes verse-letter suffixes in the citation", async () => {
+    const routing = routingFetcher({ lectionary: { readings: { gospel: "Matthew 5:1-12a" } } });
+    const app = createApp({ store: createInMemoryStore(), fetcher: routing.fetcher, now });
+
+    await app.request("/api/daily");
+
+    const bibleCalls = routing.calls.filter((u) => u.includes("bible-api.com"));
+    expect(bibleCalls[0]).toContain(encodeURIComponent("matthew 5:1-12"));
+  });
+
+  it("falls back to the seeded verse when the lectionary is unavailable", async () => {
+    const routing = routingFetcher({ lectionaryStatus: 404 });
+    const app = createApp({ store: createInMemoryStore(), fetcher: routing.fetcher, now });
+
+    const res = await app.request("/api/daily");
+    const body = (await res.json()) as Record<string, any>;
+    expect(body.reference).toBe(pickDailyReference(DAY));
+  });
+});
+
+describe("citation normalization", () => {
+  it("keeps comma-separated sections", async () => {
+    const routing = routingFetcher({ lectionary: { readings: { gospel: "Matthew 2:13-15, 19-23" } } });
+    const app = createApp({ store: createInMemoryStore(), fetcher: routing.fetcher, now });
+
+    await app.request("/api/daily");
+
+    const bibleCalls = routing.calls.filter((u) => u.includes("bible-api.com"));
+    expect(bibleCalls[0]).toContain(encodeURIComponent("matthew 2:13-15, 19-23"));
+  });
+
+  it("strips letter suffixes anywhere in the citation", async () => {
+    const routing = routingFetcher({ lectionary: { readings: { gospel: "Luke 6:20b, 24-26" } } });
+    const app = createApp({ store: createInMemoryStore(), fetcher: routing.fetcher, now });
+
+    await app.request("/api/daily");
+
+    const bibleCalls = routing.calls.filter((u) => u.includes("bible-api.com"));
+    expect(bibleCalls[0]).toContain(encodeURIComponent("luke 6:20, 24-26"));
   });
 });

@@ -148,6 +148,14 @@ export class AuthStore {
     return row.user_id;
   }
 
+  async resolveSession(rawToken: string): Promise<string | null> {
+    const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawToken));
+    const hash = [...new Uint8Array(bytes)]
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("");
+    return this.getSessionUser(hash);
+  }
+
   async upsertUser(user: XUser): Promise<void> {
     await this.client.set(userKey(user.id), user);
   }

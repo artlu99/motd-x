@@ -5,6 +5,7 @@
   "assets": {
     "directory": "public"
   },
+  "observability": { "enabled": true },
   "routes": [
     { "pattern": "motd-x.artlu.xyz", "custom_domain": true }
   ]
