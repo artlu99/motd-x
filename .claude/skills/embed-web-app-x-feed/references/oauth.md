@@ -146,3 +146,14 @@ CREATE TABLE sessions (
 - storage unavailable in standalone (explain BEFORE navigating away)
 - popup blocked (show a manual "open sign-in" link as fallback)
 - X denies / user cancels (callback page with a retry link)
+
+## Deployment notes (observed 2026-10)
+
+Platform behavior that cost real debugging time. Timely — re-verify before relying on it.
+
+- **`GET /2/users/me` can 403 with `client-not-enrolled` / `client-forbidden` even when everything you control is correct.** Seen on the Free plan and on brand-new Pay-Per-Use projects: authorize succeeds, the code exchange succeeds, and the profile lookup 403s. Causes seen in the wild: the App is not attached to a Project; a new Project/App enrolled in the wrong product (e.g. Ads instead of Pay Per Use); backend enrollment lag or bugs. X staff have fixed several of these by hand after developers posted their App ID in a devcommunity thread — that escalation path works.
+- **`tweet.read` is required for `/2/users/me` even though it looks irrelevant** (the endpoint supports tweet-related expansions) — `users.read` alone 403s. Request both scopes.
+- **Confidential apps require the client secret at the token exchange** (`Authorization: Basic base64(urlencode(client_id):urlencode(client_secret))`); public/SPA apps must not send it. Make the secret optional in code so both app types work, and check the app's "Type of App" if the exchange 401s. Changing an app's type can rotate the Client ID.
+- **Capture the full error body** (`reason`, `title`, `detail`, `type`, `registration_url`) when the profile lookup fails — X's `detail` text is specific (e.g. "you must use keys and tokens from a developer App that is attached to a Project") and `registration_url` often links straight to the fix. None of it is secret: log it and render the reason on the failure page.
+- **Identity without `/2/users/me` does not exist on any plan.** Access tokens are opaque (no JWT/id_token), the callback redirect carries no user hint, and no other Free/Pay-Per-Use endpoint reveals identity. If the endpoint is unavailable, the only options are a fallback identity or out-of-band binding (e.g. one-time claim codes distributed to known users). Do not parse logs or traces for identity — there is nothing there.
+- **Session storage per context:** sandboxed iframe → memory only (re-auth per card load). Standalone → `sessionStorage` survives the OAuth redirect; `localStorage` additionally survives browser restarts, making sign-in a once-per-device event. Probe storage availability before relying on it.

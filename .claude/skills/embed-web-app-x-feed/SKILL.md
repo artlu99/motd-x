@@ -159,6 +159,19 @@ These exist because the app runs inside someone else's page and inside iframes:
    480x480 viewport to approximate it; confirm graceful degradation when
    storage is unavailable. Final check: real post on X.
 
+## Production lessons (observed 2026-10)
+
+From taking a player-card app to production. Dated items may drift — re-verify against current X docs and devcommunity threads before relying on them.
+
+- **Build auth observability before the first real sign-in.** Debugging OAuth requires the user to click through a browser flow you cannot see. Emit structured JSON checkpoints (start, callback entry, state lookup, token status, profile status, completion) via `console.*`, enable Workers observability, and run `wrangler tail --format json` in a background shell while the user goes through the flow. Mask every token, verifier, and secret; user ids and handles are fine to log. Tests can spy on `console.log`/`console.error` to pin the checkpoints.
+- **A failed profile lookup must not fail sign-in.** The token exchange is the auth gate: once it succeeds, the visitor is authenticated even if `GET /2/users/me` fails afterward. Trap profile errors, mint the session against a fallback identity (e.g. username `friend`), and serve non-personalized content. Render the upstream reason (escaped) on the failure page — a bare "sign-in failed" page costs a full debug round-trip.
+- **Personalized responses must be `private, no-store`.** A `/me`-style route advertising `public, s-maxage` can be cached by a browser or shared cache and served to a different user — cache poisoning. The player shell should also be `no-store` (a stale shell masquerades as an auth bug). Public content routes may stay share-cacheable, but set `max-age=0` so browsers revalidate: mid-day content changes must be visible immediately.
+- **Browser caches — not just CDNs — serve fossils.** Observed: a mobile in-app browser served a stale page *and* a stale API response entirely from local cache, which looked exactly like an auth failure; server logs showed zero requests. Verify with `wrangler tail` (no events = client cache) and a cache-busting query param before debugging the wrong layer.
+- **Test routes through the same mount shape production uses.** A sub-app mounted at an exact path (`/api/x`) does not receive subpaths (`/api/x/me`) — tests that invoke the sub-app directly pass while production 404s. Register both the exact path and the `/*` form.
+- **Right after deploy, a custom-domain route can briefly serve a stale pre-deploy response, including 404s.** Confirm with a cache-busting query param before concluding the deploy failed.
+- **Keep storage behind a narrow interface.** Swapping the datastore (D1 → KV → an external store) then touches one adapter file and zero route/test logic. The seam pays for itself the first migration.
+- **Always show visible feedback for a completed sign-in**, even when personalization is unavailable (e.g. an @handle chip). A button that silently disappears reads as "nothing happened".
+
 ## Pitfalls
 
 - Serving meta tags only to Twitterbot UA or redirecting the crawler: fragile
